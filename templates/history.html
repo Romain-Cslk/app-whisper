@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Historique des transcriptions</title>
+    <script>
+      (function () {
+        const saved = localStorage.getItem("theme") ||
+          (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", saved);
+      })();
+    </script>
+    <link rel="stylesheet" href="/static/style.css?v=20260827-output-name" />
+    <link rel="stylesheet" href="/static/history.css?v=20260915-history" />
+    <link rel="icon" href="/static/icon.ico" type="image/x-icon" />
+  </head>
+  <body class="history-page">
+    <header class="history-topbar">
+      <div class="history-brand">
+        <a class="history-back" href="/" aria-label="Retour au transcripteur">←</a>
+        <div>
+          <strong>Historique des transcriptions</strong>
+          <span id="history-range">Semaine en cours</span>
+        </div>
+      </div>
+      <div class="history-toolbar">
+        <button id="history-prev" type="button" class="ghost" aria-label="Semaine précédente">‹</button>
+        <button id="history-today" type="button" class="ghost">Aujourd'hui</button>
+        <button id="history-next" type="button" class="ghost" aria-label="Semaine suivante">›</button>
+        <label class="history-search">
+          <span class="sr-only">Rechercher dans les transcriptions</span>
+          <input id="history-search" type="search" placeholder="Rechercher dans les transcriptions…" autocomplete="off" />
+        </label>
+        <button id="toggle-theme" type="button" class="ghost">🌙 Mode sombre</button>
+      </div>
+    </header>
+
+    <main class="history-shell">
+      <section class="history-calendar-card" aria-label="Agenda hebdomadaire des transcriptions">
+        <div id="history-loading" class="history-loading">Chargement de l'historique…</div>
+        <div id="history-empty" class="history-empty" hidden>
+          Aucune transcription pour cette semaine.
+        </div>
+        <div id="history-calendar" class="history-calendar" hidden></div>
+      </section>
+    </main>
+
+    <aside id="history-detail" class="history-detail" aria-hidden="true">
+      <div class="history-detail-header">
+        <div>
+          <span class="history-kicker">Transcription</span>
+          <h2 id="history-detail-title">Détail</h2>
+          <p id="history-detail-meta"></p>
+        </div>
+        <button id="history-detail-close" type="button" class="ghost" aria-label="Fermer">✕</button>
+      </div>
+      <div id="history-detail-sources" class="history-detail-sources"></div>
+      <div id="history-detail-artifacts" class="history-detail-artifacts"></div>
+      <pre id="history-detail-content" class="history-detail-content">Sélectionnez une transcription dans l'agenda.</pre>
+    </aside>
+    <div id="history-overlay" class="history-overlay" hidden></div>
+
+    <script src="/static/history.js?v=20260915-history" defer></script>
+  </body>
+</html>

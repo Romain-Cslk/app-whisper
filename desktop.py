@@ -7,7 +7,7 @@ from urllib.request import urlopen
 import uvicorn
 import webview
 
-from server import app, shutdown_background_services
+from application import app, shutdown_background_services
 
 
 def _is_our_server_ready(port: int) -> bool:
@@ -20,6 +20,8 @@ def _is_our_server_ready(port: int) -> bool:
 
 
 if __name__ == "__main__":
+    # Le socket est réservé avant le démarrage : aucun service tiers ne peut
+    # prendre le port entre la détection et le lancement d'Uvicorn.
     listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listen_socket.bind(("127.0.0.1", 0))
