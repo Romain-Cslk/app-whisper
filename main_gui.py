@@ -7,7 +7,7 @@ from urllib.request import urlopen
 import uvicorn
 import webview
 
-from server import app, shutdown_background_services
+from application import app, shutdown_background_services
 
 
 def _is_our_server_ready(port: int) -> bool:

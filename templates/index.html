@@ -14,6 +14,23 @@
     <link rel="stylesheet" href="/static/style.css?v=20260827-output-name" />
     <link rel="icon" href="/static/icon.ico" type="image/x-icon" />
     <style>
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+      }
+      .history-entry-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        padding: 0 0.85rem;
+        border: 1px solid rgba(127, 127, 127, 0.35);
+        border-radius: 10px;
+        color: inherit;
+        text-decoration: none;
+        background: rgba(127, 127, 127, 0.06);
+      }
       .native-audio-panel {
         margin-top: 0.85rem;
         padding: 0.9rem;
@@ -84,6 +101,10 @@
         .native-audio-device-grid {
           flex-direction: column;
         }
+        .header-actions {
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
       }
     </style>
   </head>
@@ -98,7 +119,10 @@
             <p class="subtitle">Conversion MP4 automatique · Traitement local ou API OpenAI</p>
           </div>
         </div>
-        <button id="toggle-theme" type="button">🌙 Mode sombre</button>
+        <div class="header-actions">
+          <a class="history-entry-link" href="/history">Historique</a>
+          <button id="toggle-theme" type="button">🌙 Mode sombre</button>
+        </div>
       </div>
     </header>
 
