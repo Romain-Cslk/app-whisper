@@ -46,7 +46,11 @@ def main(argv: list[str] | None = None) -> int:
         app.setWindowIcon(QIcon(str(paths.asset_path("icon.ico"))))
     except Exception as exc:
         if not args.smoke_test:
-            QMessageBox.critical(None, "Démarrage impossible", f"Impossible de préparer les dossiers utilisateur : {exc}")
+            QMessageBox.critical(
+                None,
+                "Démarrage impossible",
+                f"Impossible de préparer les dossiers utilisateur : {exc}",
+            )
         return 1
 
     class CrashNotifier(QObject):
@@ -67,16 +71,34 @@ def main(argv: list[str] | None = None) -> int:
     notifier = CrashNotifier()
     notifier.raised.connect(notifier.show_error)
     install_exception_handler(notifier.raised.emit)
-    report: dict[str, object] = {"version": __version__, "frozen": bool(getattr(sys, "frozen", False)), "ok": False}
+    report: dict[str, object] = {
+        "version": __version__,
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "ok": False,
+    }
     exit_code = 0
     try:
         from transcripteur_whisper.ui.main_window import MainWindow
+        from transcripteur_whisper.ui.widgets.history_page import install_history_tab
 
         window = MainWindow(paths, monitor=False) if args.smoke_test else MainWindow(paths)
+        install_history_tab(window, paths)
         window.show()
         if args.smoke_test:
             versions = {}
-            for name in ("PySide6", "faster_whisper", "ctranslate2", "av", "soundcard", "sounddevice", "soundfile", "numpy", "onnxruntime", "openai"):
+            dependencies = (
+                "PySide6",
+                "faster_whisper",
+                "ctranslate2",
+                "av",
+                "soundcard",
+                "sounddevice",
+                "soundfile",
+                "numpy",
+                "onnxruntime",
+                "openai",
+            )
+            for name in dependencies:
                 module = importlib.import_module(name)
                 versions[name] = getattr(module, "__version__", "imported")
             from av import Codec
@@ -90,7 +112,16 @@ def main(argv: list[str] | None = None) -> int:
                 if not paths.asset_path(name).is_file() or QPixmap(str(paths.asset_path(name))).isNull():
                     raise RuntimeError(f"Ressource manquante ou invalide : {name}")
             monitor = QMediaDevices()
-            report.update(imports=versions, qt_multimedia=type(monitor).__name__, window=type(window).__name__, assets=True, paths=True, vad=True, mp3_encoder=True)
+            report.update(
+                imports=versions,
+                qt_multimedia=type(monitor).__name__,
+                window=type(window).__name__,
+                assets=True,
+                paths=True,
+                vad=True,
+                mp3_encoder=True,
+                history_tab=hasattr(window, "history_page"),
+            )
             QTimer.singleShot(600, window.close)
             QTimer.singleShot(10000, lambda: app.exit(2))
         exit_code = app.exec()
@@ -100,7 +131,9 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger(__name__).exception("Application startup/smoke failed")
         report["error"] = "Startup/smoke failed; see app.log"
         if not args.smoke_test:
-            notifier.show_error("Impossible de démarrer l'application. Consultez les journaux pour le détail.")
+            notifier.show_error(
+                "Impossible de démarrer l'application. Consultez les journaux pour le détail."
+            )
         exit_code = 1
     finally:
         if args.smoke_report:
