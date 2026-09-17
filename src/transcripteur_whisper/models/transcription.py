@@ -14,6 +14,9 @@ class TranscriptionOptions:
     language: str | None = "fr"
     output_type: str = "transcription"
     output_name: str = ""
+    generate_summary: bool = False
+    summary_provider: str = ""
+    summary_prompt: str = ""
 
     @property
     def use_api(self) -> bool:
@@ -31,4 +34,3 @@ class TranscriptionOptions:
             raise ValidationError("Format de sortie inconnu.")
         if (self.use_api or self.output_type != "transcription") and not api_key.strip():
             raise ValidationError("Une clé OpenAI est nécessaire pour ce traitement.")
-

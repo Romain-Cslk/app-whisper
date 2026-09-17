@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..models.jobs import TERMINAL_STATUSES, JobError
+from .ai_summary import PROVIDERS, SummaryError, SummaryPreferences, generate_daily_summary
 from .files import write_text_atomic
 from .job_service import JobService, timestamp
 from .library_storage import (
@@ -20,6 +21,7 @@ from .library_storage import (
     atomic_copy,
     atomic_json,
     checked_file,
+    export_filename,
     load_json,
     unique_paths,
 )
@@ -31,6 +33,7 @@ PHASES = {
     "transcription_api": "Transcription OpenAI",
     "recomposition": "Écriture du transcript",
     "document": "Génération du document",
+    "summary": "Génération du CR IA",
     "done": "Terminé",
     "partial": "Résultat partiel",
     "error": "Échec",
@@ -51,11 +54,25 @@ class LibraryJobService(JobService):
             self.load_history()
 
     def submit(self, files, options, api_key=""):
+        summary_provider = ""
+        if getattr(options, "generate_summary", False):
+            preferences = SummaryPreferences.load(self.paths)
+            summary_provider = (getattr(options, "summary_provider", "") or preferences.provider).strip().lower()
+            if summary_provider not in PROVIDERS:
+                raise JobError("Fournisseur de résumé IA inconnu.")
+            if not preferences.key_for(summary_provider):
+                raise JobError(
+                    f"Aucune clé API n'est enregistrée pour {PROVIDERS[summary_provider]['label']}. "
+                    "Ajoutez-la dans Paramètres > Résumé IA."
+                )
         # Lock order is shared with deletion/retention. A queued job protects its
         # source before any cleanup can start, including concurrent submissions.
         with self.catalog.lock, self._lock:
             identifier = super().submit(files, options, api_key)
             job = self._jobs[identifier]
+            job["summary_requested"] = bool(getattr(options, "generate_summary", False))
+            job["summary_provider"] = summary_provider or None
+            job["summary_state"] = "pending" if job["summary_requested"] else "disabled"
             for metadata in job["files"]:
                 record = self.catalog.find(Path(metadata["path"]))
                 if record and not record.get("deleted"):
@@ -130,7 +147,8 @@ class LibraryJobService(JobService):
                         metadata.setdefault("stage", metadata["status"])
                         metadata.pop("path", None)
                         for key, available in (("transcription_path", "transcription_available"),
-                                               ("document_path", "document_available")):
+                                               ("document_path", "document_available"),
+                                               ("summary_path", "summary_available")):
                             raw = metadata.get(key)
                             safe = None
                             if raw:
@@ -177,7 +195,8 @@ class LibraryJobService(JobService):
         roots = self._artifact_roots(job_id)
         for metadata in snapshot["files"]:
             for key, available in (("transcription_path", "transcription_available"),
-                                   ("document_path", "document_available")):
+                                   ("document_path", "document_available"),
+                                   ("summary_path", "summary_available")):
                 try:
                     path = checked_file(Path(metadata[key]), roots, (".txt",)) if metadata.get(key) else None
                 except (OSError, ValueError):
@@ -188,6 +207,7 @@ class LibraryJobService(JobService):
             metadata["output_name"] = Path(metadata["out_path"]).name if metadata["out_path"] else None
         snapshot["has_transcriptions"] = any(m["transcription_available"] for m in snapshot["files"])
         snapshot["has_documents"] = any(m["document_available"] for m in snapshot["files"])
+        snapshot["has_summaries"] = any(m.get("summary_available", False) for m in snapshot["files"])
         return snapshot
 
     def delete_file(self, path: Path):
@@ -198,7 +218,7 @@ class LibraryJobService(JobService):
             for identifier, job in self._jobs.items():
                 for metadata in job["files"]:
                     matches = any(metadata.get(key) and Path(metadata[key]).resolve() == path
-                                  for key in ("path", "transcription_path", "document_path", "out_path"))
+                                  for key in ("path", "transcription_path", "document_path", "summary_path", "out_path"))
                     record = self.catalog.records.get(metadata.get("recording_id"), {})
                     matches = matches or record.get("path") == str(path)
                     if matches and job["status"] not in TERMINAL_STATUSES:
@@ -213,7 +233,8 @@ class LibraryJobService(JobService):
             for identifier in set(affected):
                 for metadata in self._jobs[identifier]["files"]:
                     for key, available in (("transcription_path", "transcription_available"),
-                                           ("document_path", "document_available")):
+                                           ("document_path", "document_available"),
+                                           ("summary_path", "summary_available")):
                         if metadata.get(key) and Path(metadata[key]).resolve() == path:
                             metadata[key] = None
                             metadata[available] = False
@@ -254,7 +275,7 @@ class LibraryJobService(JobService):
                 counter += 1
             old_paths = {}
             for index, metadata in enumerate(self._jobs[job_id]["files"]):
-                for key in ("transcription_path", "document_path", "out_path"):
+                for key in ("transcription_path", "document_path", "summary_path", "out_path"):
                     raw = metadata.get(key)
                     if raw:
                         candidate = Path(raw).resolve()
@@ -301,7 +322,7 @@ class LibraryJobService(JobService):
             source_root = source_manifest.parent.resolve()
             transfers = []
             for index, metadata in enumerate(job["files"]):
-                for key in ("transcription_path", "document_path"):
+                for key in ("transcription_path", "document_path", "summary_path"):
                     raw = metadata.get(key)
                     if not raw:
                         continue
@@ -337,6 +358,8 @@ class LibraryJobService(JobService):
                         self._jobs[job_id]["files"][index]["transcription_available"] = True
                     elif key == "document_path":
                         self._jobs[job_id]["files"][index]["document_available"] = True
+                    elif key == "summary_path":
+                        self._jobs[job_id]["files"][index]["summary_available"] = True
                 for metadata in self._jobs[job_id]["files"]:
                     metadata["out_path"] = metadata.get("document_path") or metadata.get("transcription_path")
                 self._jobs[job_id]["storage_state"] = "published"
@@ -363,6 +386,99 @@ class LibraryJobService(JobService):
                 except OSError:
                     pass
         return True
+
+    def _generate_summaries(self, job_id, options) -> None:
+        if not getattr(options, "generate_summary", False):
+            return
+        with self._lock:
+            if self._jobs[job_id].get("status") != "done":
+                self._jobs[job_id]["summary_state"] = "skipped"
+                self._jobs[job_id]["logs"].append(
+                    "Résumé IA non généré : la transcription n'est pas entièrement terminée."
+                )
+                self._persist(job_id)
+                return
+            self._jobs[job_id]["summary_state"] = "running"
+            self._jobs[job_id]["logs"].append("Résumé IA : génération du compte rendu de daily…")
+            self._persist(job_id)
+
+        preferences = SummaryPreferences.load(self.paths)
+        provider = (getattr(options, "summary_provider", "") or preferences.provider).strip().lower()
+        prompt = (getattr(options, "summary_prompt", "") or preferences.prompt).strip()
+        try:
+            api_key = preferences.key_for(provider)
+        except SummaryError as exc:
+            api_key = ""
+            key_error = str(exc)
+        else:
+            key_error = ""
+        if not api_key:
+            with self._lock:
+                self._jobs[job_id]["summary_state"] = "error"
+                self._jobs[job_id]["logs"].append(
+                    "Résumé IA non généré : " + (key_error or "clé API absente pour le fournisseur sélectionné.")
+                )
+                self._persist(job_id)
+            return
+
+        manifest = self._manifest_paths.get(job_id, self.paths.results / job_id / "job.json")
+        work_root = manifest.parent.resolve()
+        generated = 0
+        failures = 0
+        with self._lock:
+            metadata_list = list(enumerate(self._jobs[job_id]["files"]))
+            output_name = str(self._jobs[job_id].get("output_name") or "").strip()
+
+        def cancelled() -> None:
+            # The transcription job is already terminal, so close/cancel does not
+            # discard a generated transcript. This hook remains for provider/chunk
+            # loops and future cancellation support.
+            return None
+
+        def log(message: str) -> None:
+            with self._lock:
+                self._jobs[job_id]["logs"].append(message)
+                self._persist(job_id)
+
+        for index, metadata in metadata_list:
+            if metadata.get("status") != "done" or not metadata.get("transcription_path"):
+                continue
+            try:
+                transcript = checked_file(Path(metadata["transcription_path"]), (work_root,), (".txt",))
+                text = transcript.read_text(encoding="utf-8")
+                title = output_name or Path(str(metadata.get("name") or "daily")).stem
+                if len(metadata_list) > 1:
+                    title = f"{title}_{index + 1}"
+                summary = generate_daily_summary(
+                    provider, api_key, prompt, text, cancel_check=cancelled, log=log
+                )
+                if not summary.strip():
+                    raise SummaryError("Le résumé IA est vide.")
+                summary_path = work_root / export_filename(title, "summary", ".txt")
+                write_text_atomic(summary_path, summary.strip())
+                with self._lock:
+                    item = self._jobs[job_id]["files"][index]
+                    item["summary_path"] = str(summary_path)
+                    item["summary_available"] = True
+                    generated += 1
+                    self._persist(job_id)
+            except Exception as exc:
+                failures += 1
+                with self._lock:
+                    self._jobs[job_id]["logs"].append(
+                        f"Résumé IA non généré pour {metadata.get('name', 'ce fichier')} : {exc}"
+                    )
+                    self._persist(job_id)
+
+        with self._lock:
+            self._jobs[job_id]["summary_state"] = (
+                "done" if generated and not failures else "partial" if generated else "error"
+            )
+            if generated:
+                self._jobs[job_id]["logs"].append(
+                    f"Résumé IA : {generated} compte rendu(s) généré(s) avec {PROVIDERS[provider]['label']}."
+                )
+            self._persist(job_id)
 
     def cleanup_audio(self):
         with self.catalog.lock, self._lock:
@@ -392,6 +508,16 @@ class LibraryJobService(JobService):
 
     def _run(self, job_id, options, api_key):
         super()._run(job_id, options, api_key)
+        try:
+            self._generate_summaries(job_id, options)
+        except Exception as exc:
+            with self._lock:
+                self._jobs[job_id]["summary_state"] = "error"
+                self._jobs[job_id]["logs"].append(
+                    "Résumé IA indisponible ; la transcription reste conservée : " + str(exc)
+                )
+                self._persist(job_id)
+            logger.warning("Résumé IA impossible : %s", exc)
         try:
             published = self._publish_job(job_id)
             if published:
@@ -429,11 +555,12 @@ class LibraryJobService(JobService):
         keys = {
             "transcription": ("transcription_path",),
             "document": ("document_path",),
+            "summary": ("summary_path",),
             "result": ("out_path",),
         }
         if kind not in keys:
             raise JobError("Type d'export inconnu.")
-        wanted = ("transcription_path", "document_path") if destination.suffix.lower() == ".zip" else keys[kind]
+        wanted = ("transcription_path", "document_path", "summary_path") if destination.suffix.lower() == ".zip" else keys[kind]
         roots = self._artifact_roots(job_id)
         sources = list(dict.fromkeys(
             checked_file(Path(metadata[key]), roots, (".txt",))

@@ -212,15 +212,8 @@ class LibraryRecordingService(RecordingService):
 
     def _reap_orphans(self):
         """Release old SoundCard contexts only after their reader has returned."""
-        # Some recovery paths (and focused lifecycle tests) can operate on a
-        # minimally reconstructed service. Treat an absent orphan registry as
-        # an empty registry instead of breaking recovery/abandonment.
-        orphan_sessions = getattr(self, "_orphan_sessions", None)
-        if not orphan_sessions:
-            self._orphan_sessions = []
-            return
         remaining: list[tuple[object, bool]] = []
-        for session, finalized in orphan_sessions:
+        for session, finalized in self._orphan_sessions:
             reader = session._system_reader_thread
             if reader is not None and reader.is_alive():
                 remaining.append((session, finalized))
@@ -257,16 +250,10 @@ class LibraryRecordingService(RecordingService):
         # Recovery is normally queried from a generic UI worker, so route the
         # orphan reaper through the dedicated COM/coordinator thread. Calls made
         # from recover()/discard_recovery() are already on that thread.
-        worker = getattr(self, "_worker", None)
-        if worker is None:
-            # A minimally reconstructed service has no coordinator thread; the
-            # base implementation only needs the journal/state fields.
+        if threading.current_thread() is self._worker:
             self._reap_orphans()
             return RecordingService.recoverable_recordings(self)
-        if threading.current_thread() is worker:
-            self._reap_orphans()
-            return RecordingService.recoverable_recordings(self)
-        if getattr(self, "_closed", False):
+        if self._closed:
             return RecordingService.recoverable_recordings(self)
         return self._call(lambda: (self._reap_orphans(), RecordingService.recoverable_recordings(self))[1])
 

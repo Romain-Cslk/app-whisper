@@ -36,15 +36,25 @@ class LibraryPage(HistoryPage):
         self.search.setMaxLength(200)
         self.audios = QCheckBox("Audios")
         self.transcripts = QCheckBox("Transcripts / documents")
+        self.summaries = QCheckBox("Résumés IA")
         self.audios.setChecked(True)
         self.transcripts.setChecked(True)
+        self.summaries.setChecked(True)
         filters = QHBoxLayout()
         filters.addWidget(self.audios)
         filters.addWidget(self.transcripts)
+        filters.addWidget(self.summaries)
         filters.addStretch()
+        # The native week view used to enforce a 760 px table with 125 px
+        # columns. Let it actually contract on small windows instead.
+        self.table.setMinimumWidth(0)
+        self.table.horizontalHeader().setMinimumSectionSize(58)
+        self.table.verticalHeader().setMinimumWidth(44)
+        self._compact_history = None
         self.layout().insertLayout(1, filters)
         self.audios.toggled.connect(lambda _: self.refresh())
         self.transcripts.toggled.connect(lambda _: self.refresh())
+        self.summaries.toggled.connect(lambda _: self.refresh())
         self.delete_button = QPushButton("Supprimer le fichier sélectionné…")
         self.delete_button.clicked.connect(self.delete_selected)
         # Keep actions within the detail pane, not across the calendar.
@@ -52,7 +62,13 @@ class LibraryPage(HistoryPage):
         self.delete_button.setEnabled(False)
 
     def _query_key(self):
-        return (self.current_week, self.search.text().strip(), self.audios.isChecked(), self.transcripts.isChecked())
+        return (
+            self.current_week,
+            self.search.text().strip(),
+            self.audios.isChecked(),
+            self.transcripts.isChecked(),
+            self.summaries.isChecked(),
+        )
 
     def refresh(self):
         self._generation += 1
@@ -69,7 +85,7 @@ class LibraryPage(HistoryPage):
         self._loading = True
         self.refresh_button.setEnabled(False)
         self.runner.submit(
-            lambda: self.service.week(key[0], key[1], audio=key[2], transcripts=key[3]),
+            lambda: self.service.week(key[0], key[1], audio=key[2], transcripts=key[3], summaries=key[4]),
             lambda entries: self._render(entries) if generation == self._generation and key == self._query_key() else None,
             lambda message: self._load_failed(message) if generation == self._generation else None,
             self._load_finished,
@@ -83,13 +99,36 @@ class LibraryPage(HistoryPage):
 
     def _render(self, entries):
         super()._render(entries)
-        # Several recordings in one hour must never hide each other.
+        self._resize_history_rows(entries)
+        if (not entries and not self.audios.isChecked() and not self.transcripts.isChecked()
+                and not self.summaries.isChecked()):
+            self._clear_detail("Cochez Audios, Transcripts, Résumés IA ou plusieurs filtres.")
+
+    def _resize_history_rows(self, entries=None):
+        entries = list(entries if entries is not None else self.entries.values())
+        compact = self.width() < 900
+        base_height = 44 if compact else 62
+        card_height = 32 if compact else 44
+        self.table.horizontalHeader().setMinimumSectionSize(58 if compact else 88)
+        self.table.verticalHeader().setDefaultSectionSize(base_height)
+        self.search.setMaximumWidth(230 if compact else 420)
         for row in range(24):
-            counts = [sum(e.start.hour == row and max(0, min(6, (e.start.date() - self.current_week).days)) == day
-                          for e in entries) for day in range(7)]
-            self.table.setRowHeight(row, max(62, max(counts, default=0) * 44 + 6))
-        if not entries and not self.audios.isChecked() and not self.transcripts.isChecked():
-            self._clear_detail("Cochez Audios, Transcripts ou les deux pour afficher les fichiers.")
+            counts = [sum(
+                e.start.hour == row
+                and max(0, min(6, (e.start.date() - self.current_week).days)) == day
+                for e in entries
+            ) for day in range(7)]
+            self.table.setRowHeight(row, max(base_height, max(counts, default=0) * card_height + 4))
+        for button in self.table.findChildren(QPushButton):
+            button.setMinimumHeight(28 if compact else 38)
+            button.setMaximumHeight(34 if compact else 48)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        compact = self.width() < 900
+        if compact != self._compact_history:
+            self._compact_history = compact
+            self._resize_history_rows()
 
     def select_entry(self, identifier):
         super().select_entry(identifier)
@@ -180,7 +219,7 @@ class LibraryPage(HistoryPage):
         if not artifact or not entry:
             return
         filename = artifact.label
-        if filename in {"transcription.txt", "transcriptions.txt", "document.txt", "resume.txt"}:
+        if filename in {"transcription.txt", "transcriptions.txt", "document.txt", "resume.txt", "summary.txt"}:
             filename = export_filename(entry.title, artifact.kind)
         extension = ".wav" if artifact.kind == "audio" else ".txt"
         destination, _ = QFileDialog.getSaveFileName(self, "Enregistrer le fichier", filename,

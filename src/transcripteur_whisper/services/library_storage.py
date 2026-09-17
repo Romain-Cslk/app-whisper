@@ -260,8 +260,10 @@ def export_filename(title: str, kind: str = "transcription", extension: str = ".
             title = title[:-len(suffix)]
     title = re.sub(r"\s+", " ", title)[:80].rstrip(". ")
     title = title or datetime.now().strftime("%d_%m_%Y_%Hh%M")
-    if kind not in {"transcription", "document", "audio", "resultats"}:
+    if kind not in {"transcription", "document", "audio", "resultats", "summary"}:
         kind = "document"
+    if kind == "summary":
+        kind = "resume_ia"
     if extension not in {".txt", ".wav", ".zip"}:
         raise LibraryError("Extension d'export non prise en charge.")
     return f"{kind}_{title}{extension}"

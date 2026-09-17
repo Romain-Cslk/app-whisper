@@ -28,6 +28,8 @@ def confirm_removal(parent, path: Path, *, recovery=False) -> bool:
 class LibraryRecordingPanel(RecordingPanel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._force_stopping = False
+        self._normal_stop_error = ""
         self.name = QLineEdit()
         self.name.setMaxLength(80)
         self.name.setPlaceholderText("Ex. Réunion de lancement")
@@ -41,7 +43,7 @@ class LibraryRecordingPanel(RecordingPanel):
         self.discard_button.hide()
         self.layout().addWidget(self.discard_button)
         self.record_button.setMinimumHeight(46)
-        self.record_button.setMinimumWidth(235)
+        self.record_button.setMinimumWidth(210)
         self.record_button.setStyleSheet('''
             QPushButton { background: #c63549; color: white; padding: 10px 18px;
                           border: 2px solid #f37082; border-radius: 7px; font-weight: bold; }
@@ -54,7 +56,9 @@ class LibraryRecordingPanel(RecordingPanel):
 
     def _record_label(self):
         self.name.setEnabled(not self.busy)
-        if self._transition:
+        if self._force_stopping:
+            text = "Sécurisation de l'enregistrement…"
+        elif self._transition:
             text = "Finalisation…" if self._stopping else "Veuillez patienter…"
         elif self.service.is_active:
             text = "■ Arrêter l'enregistrement"
@@ -66,14 +70,80 @@ class LibraryRecordingPanel(RecordingPanel):
         self.service.output_name = self.name.text().strip()
         super().start_recording()
 
+    def _failed(self, message: str) -> None:
+        # The Windows/SoundCard loopback reader can exceptionally remain blocked
+        # inside a driver call. A normal stop must not strand the whole UI in
+        # that state: use the bounded salvage/detach path automatically.
+        if self._stopping and hasattr(self.service, "force_stop"):
+            if self.service.is_active and not self._force_stopping:
+                self._normal_stop_error = message
+                self._stopping = False
+                self._force_stopping = True
+                self.status.setText(
+                    "Le flux Windows ne répond pas à l'arrêt standard. "
+                    "Sécurisation des données déjà enregistrées…"
+                )
+                self.notice.emit(
+                    "Arrêt audio lent détecté : récupération automatique du WAV en cours."
+                )
+                self._record_label()
+                self.runner.submit(
+                    self.service.force_stop,
+                    self._force_stopped,
+                    self._force_failed,
+                    self._force_finished,
+                )
+                return
+            if not self.service.is_active:
+                # The backend already released its slot but could not produce a
+                # final WAV. Keep recovery files and, importantly, leave the UI
+                # operable (and allow an application close to finish).
+                self._stopping = False
+                self.level_timer.stop()
+                self.status.setText(
+                    "Arrêt effectué avec récupération nécessaire. Les données disponibles ont été conservées."
+                )
+                self.notice.emit(message)
+                self.scan_recovery()
+                return
+        super()._failed(message)
+
+    def _transition_finished(self):
+        # The finish callback of the failed normal stop fires after _failed().
+        # Keep the transition locked until the forced salvage worker is done.
+        if self._force_stopping:
+            return
+        super()._transition_finished()
+
+    def _force_stopped(self, result):
+        self._normal_stop_error = ""
+        self._stopping = False
+        super()._stopped(result)
+        self.status.setText(
+            f"Enregistrement sécurisé : {Path(result.path).name}. Ajouté aux fichiers à transcrire."
+        )
+        self.notice.emit("Le flux audio bloqué a été libéré sans perdre le WAV récupérable.")
+
+    def _force_failed(self, message: str):
+        self._stopping = False
+        self.level_timer.stop()
+        self.status.setText(
+            "Le flux audio a été libéré. Le WAV final n'a pas pu être recomposé immédiatement ; "
+            "les pistes disponibles restent conservées pour récupération."
+        )
+        self.notice.emit(message)
+
+    def _force_finished(self):
+        self._force_stopping = False
+        super()._transition_finished()
+        self.scan_recovery()
+        self._record_label()
+
     def _stopped(self, result):
         super()._stopped(result)
         warning = getattr(self.service, "last_publish_error", None)
         if warning:
-            message = (
-                "WAV terminé mais stockage final indisponible. "
-                f"Conservé dans le dossier de travail local : {Path(result.path).name}. {warning}"
-            )
+            message = f"WAV conservé dans le dossier Enregistrements : {Path(result.path).name}. {warning}"
             self.status.setText(message)
             self.notice.emit(message)
 
@@ -81,9 +151,7 @@ class LibraryRecordingPanel(RecordingPanel):
         super()._recovered(path)
         warning = getattr(self.service, "last_publish_error", None)
         if warning:
-            self.notice.emit(
-                "WAV récupéré dans le dossier de travail local ; stockage final indisponible : " + warning
-            )
+            self.notice.emit("WAV récupéré localement : " + warning)
 
     def _show_recovery(self, paths):
         super()._show_recovery(paths)
@@ -132,6 +200,17 @@ class LibraryResultsPanel(ResultsPanel):
     def load(self, job_id, snapshot):
         self._snapshot = snapshot
         super().load(job_id, snapshot)
+        for metadata in snapshot.get("files", []):
+            raw = metadata.get("summary_path")
+            if not raw:
+                continue
+            path = Path(raw)
+            if path in self.entries:
+                continue
+            self.entries.append(path)
+            self.files.addItem(path.name)
+            self.files.item(self.files.count() - 1).setToolTip(str(path))
+        self._selection_changed()
 
     def _selection_changed(self, *args):
         super()._selection_changed(*args)
@@ -178,11 +257,12 @@ class LibraryResultsPanel(ResultsPanel):
         source = self.selected_path
         if source is None:
             return
-        kind = "transcription" if any(m.get("transcription_path") == str(source)
-                                     for m in self._snapshot.get("files", [])) else "document"
-        # Keep the source's per-file suffix for batches; only repair generic legacy names.
+        kind = "summary" if any(m.get("summary_path") == str(source) for m in self._snapshot.get("files", [])) else (
+            "transcription" if any(m.get("transcription_path") == str(source)
+                                   for m in self._snapshot.get("files", [])) else "document"
+        )
         filename = source.name
-        if source.name in {"transcription.txt", "document.txt", "resume.txt"}:
+        if source.name in {"transcription.txt", "document.txt", "resume.txt", "summary.txt"}:
             filename = export_filename(self._snapshot.get("output_name", ""), kind)
         destination, _ = QFileDialog.getSaveFileName(self, "Enregistrer le résultat", filename, "Texte (*.txt)")
         if destination:

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...services.ai_summary import PROVIDERS, SummaryPreferences
 from ...services.library_storage import RETENTION, StoragePreferences
 
 
@@ -30,9 +32,11 @@ class StoragePage(QWidget):
     saved = Signal(object)
     notice = Signal(str)
 
-    def __init__(self, runner, paths, preferences: StoragePreferences, *, busy=lambda: False, parent=None):
+    def __init__(self, runner, paths, preferences: StoragePreferences, *, summary_preferences=None,
+                 busy=lambda: False, parent=None):
         super().__init__(parent)
         self.runner, self.paths, self.preferences, self.busy = runner, paths, preferences, busy
+        self.summary_preferences = summary_preferences or SummaryPreferences.load(paths)
 
         self.audio_work = QLineEdit(str(preferences.audio_work_dir))
         self.transcripts_work = QLineEdit(str(preferences.transcript_work_dir))
@@ -85,7 +89,7 @@ class StoragePage(QWidget):
         final_group = QGroupBox("Résultats terminés")
         final_layout = QVBoxLayout(final_group)
         final_note = QLabel(
-            "Les transcripts et documents terminés sont copiés ici une seule fois après la fin du traitement."
+            "Les transcripts, documents et résumés IA terminés sont copiés ici une seule fois après la fin du traitement."
         )
         final_note.setWordWrap(True)
         final_layout.addWidget(final_note)
@@ -94,6 +98,40 @@ class StoragePage(QWidget):
         final_form.addRow("Transcripts et documents", self._folder_row(self.transcripts_final))
         final_layout.addLayout(final_form)
         content_layout.addWidget(final_group)
+
+        ai_group = QGroupBox("Résumé IA (compte rendu de daily)")
+        ai_layout = QVBoxLayout(ai_group)
+        ai_note = QLabel(
+            "Cette clé est indépendante de la clé utilisée pour la transcription OpenAI. "
+            "Elle n'est utilisée que si « Générer un CR IA après la transcription » est coché. "
+            "Sous Windows, la clé enregistrée est protégée par votre compte Windows."
+        )
+        ai_note.setWordWrap(True)
+        ai_layout.addWidget(ai_note)
+        ai_form = QFormLayout()
+        ai_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.summary_provider = QComboBox()
+        for value, info in PROVIDERS.items():
+            self.summary_provider.addItem(info["label"], value)
+        self.summary_provider.setCurrentIndex(
+            max(0, self.summary_provider.findData(self.summary_preferences.provider))
+        )
+        self.summary_key = QLineEdit()
+        self.summary_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.summary_key.setClearButtonEnabled(True)
+        self.summary_key.setAccessibleName("Clé API pour le résumé IA")
+        self.clear_summary_key = QCheckBox("Supprimer la clé enregistrée pour ce fournisseur")
+        self.summary_prompt = QPlainTextEdit(self.summary_preferences.prompt)
+        self.summary_prompt.setAccessibleName("Prompt par défaut du compte rendu de daily")
+        self.summary_prompt.setMinimumHeight(150)
+        ai_form.addRow("Fournisseur", self.summary_provider)
+        ai_form.addRow("Clé API", self.summary_key)
+        ai_form.addRow("", self.clear_summary_key)
+        ai_form.addRow("Prompt par défaut", self.summary_prompt)
+        ai_layout.addLayout(ai_form)
+        self.summary_provider.currentIndexChanged.connect(self._summary_provider_changed)
+        self._summary_provider_changed()
+        content_layout.addWidget(ai_group)
 
         history_group = QGroupBox("Historique")
         history_layout = QVBoxLayout(history_group)
@@ -193,6 +231,17 @@ class StoragePage(QWidget):
             if automatic else "Seuls ces dossiers seront consultés."
         )
 
+    def _summary_provider_changed(self):
+        provider = self.summary_provider.currentData()
+        has_key = self.summary_preferences.has_key(provider)
+        self.summary_key.clear()
+        self.summary_key.setPlaceholderText(
+            "Clé enregistrée — saisissez une nouvelle clé pour la remplacer"
+            if has_key else "Saisissez la clé API de ce fournisseur"
+        )
+        self.clear_summary_key.setChecked(False)
+        self.clear_summary_key.setEnabled(has_key)
+
     def save(self):
         if self.busy():
             self.notice.emit("Attendez la fin du traitement ou de l'enregistrement avant de modifier le stockage.")
@@ -212,17 +261,37 @@ class StoragePage(QWidget):
             retention=self.policy.currentData(),
             history_dirs=history,
         )
+        provider = self.summary_provider.currentData()
+        prompt = self.summary_prompt.toPlainText().strip()
+        replacement_key = self.summary_key.text().strip()
+        clear_key = self.clear_summary_key.isChecked()
+
+        def save_all():
+            storage = candidate.save(self.paths)
+            summary = self.summary_preferences.save(
+                self.paths,
+                provider=provider,
+                prompt=prompt,
+                replacement_key=replacement_key,
+                clear_key=clear_key,
+            )
+            return storage, summary
+
         self.save_button.setEnabled(False)
         self.runner.submit(
-            lambda: candidate.save(self.paths),
+            save_all,
             self._saved,
             self.notice.emit,
             lambda: self.save_button.setEnabled(True),
         )
 
-    def _saved(self, preferences):
+    def _saved(self, result):
+        preferences, summary_preferences = result
         self.preferences = preferences
+        self.summary_preferences = summary_preferences
         self.message.setText(
-            "Paramètres enregistrés. Redémarrez l'application pour utiliser les nouveaux dossiers."
+            "Paramètres enregistrés. Les réglages IA sont disponibles immédiatement ; "
+            "redémarrez l'application pour appliquer de nouveaux dossiers."
         )
+        self._summary_provider_changed()
         self.saved.emit(preferences)

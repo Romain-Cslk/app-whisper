@@ -49,6 +49,8 @@ def test_storage_page_exposes_work_and_final_text_paths_without_audio_archive(wi
     assert not hasattr(page, "keep_final_audio")
     assert not hasattr(page, "audio_final")
     assert hasattr(page, "policy")
+    assert page.summary_provider.count() == 4
+    assert page.summary_prompt.toPlainText().strip()
 
 
 def test_record_name_is_shared_and_button_is_visible(window):
@@ -127,6 +129,24 @@ def test_history_filters_apply_to_associated_files(window, qtbot):
     assert not page.delete_button.isEnabled()
 
 
+def test_ai_summary_checkbox_is_separate_from_transcription_mode(window):
+    assert not window.summary_requested.isChecked()
+    assert "CR IA" in window.summary_requested.text()
+    window.mode.setCurrentIndex(max(0, window.mode.findData("local")))
+    window.summary_requested.setChecked(True)
+    assert window.mode.currentData() == "local"
+
+
+def test_history_has_summary_filter_and_compacts(window, qtbot):
+    page = window.history_page
+    assert page.summaries.isChecked()
+    window.tabs.setCurrentWidget(page)
+    window.resize(700, 560)
+    qtbot.wait(50)
+    assert page.table.minimumWidth() == 0
+    assert page.table.horizontalHeader().minimumSectionSize() <= 58
+
+
 def test_journal_shows_phase_and_percentage(window):
     window._render_job({"status": "running", "progress": .42, "logs": ["segment recu"],
                        "files": [{"name": "meeting.wav", "status": "running", "stage": "transcription_api",
@@ -141,8 +161,8 @@ def test_filter_changed_during_loading_is_not_dropped(window, qtbot, monkeypatch
     page = window.history_page
     gate, started = threading.Event(), threading.Event()
     calls = []
-    def delayed(week, query, *, audio, transcripts):
-        calls.append((audio, transcripts))
+    def delayed(week, query, *, audio, transcripts, summaries):
+        calls.append((audio, transcripts, summaries))
         if len(calls) == 1:
             started.set()
             assert gate.wait(5)
@@ -153,4 +173,4 @@ def test_filter_changed_during_loading_is_not_dropped(window, qtbot, monkeypatch
     page.audios.setChecked(False)
     gate.set()
     qtbot.waitUntil(lambda: len(calls) >= 2 and not page._loading)
-    assert calls[-1] == (False, True)
+    assert calls[-1] == (False, True, True)

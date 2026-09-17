@@ -15,9 +15,10 @@ class LibraryEntry(HistoryEntry):
     date_note: str = ""
 
 
-def filter_artifacts(entry: HistoryEntry, audio: bool, transcripts: bool):
+def filter_artifacts(entry: HistoryEntry, audio: bool, transcripts: bool, summaries: bool = True):
     artifacts = tuple(a for a in entry.artifacts if (audio and a.kind == "audio")
-                      or (transcripts and a.kind in {"transcription", "document"}))
+                      or (transcripts and a.kind in {"transcription", "document"})
+                      or (summaries and a.kind == "summary"))
     return replace(entry, artifacts=artifacts) if artifacts else None
 
 
@@ -64,7 +65,8 @@ class LibraryHistoryService(HistoryService):
                 continue
             for index, metadata in enumerate(job.get("files", [])):
                 artifacts = []
-                for kind, key in (("transcription", "transcription_path"), ("document", "document_path")):
+                for kind, key in (("transcription", "transcription_path"), ("document", "document_path"),
+                                  ("summary", "summary_path")):
                     raw = metadata.get(key)
                     if raw and Path(raw) in visible:
                         path = Path(raw)
@@ -99,7 +101,8 @@ class LibraryHistoryService(HistoryService):
                 record = by_path.get(path, {})
                 if record.get("deleted"):
                     continue
-                kind = "audio" if path.suffix.lower() == ".wav" else "transcription"
+                kind = ("audio" if path.suffix.lower() == ".wav" else
+                        "summary" if path.name.casefold().startswith(("resume_ia_", "cr_ia_")) else "transcription")
                 start = self._parse_datetime(record.get("started_at")) or datetime.fromtimestamp(stat.st_mtime).astimezone()
                 duration = record.get("duration")
                 note = "Date de l'enregistrement" if record and not record.get("time_estimated") else "Date du fichier (estimée)"
@@ -111,10 +114,10 @@ class LibraryHistoryService(HistoryService):
                 continue
         return entries
 
-    def week(self, start, query="", *, audio=True, transcripts=True):
+    def week(self, start, query="", *, audio=True, transcripts=True, summaries=True):
         first = self.week_start(start)
         end = first + timedelta(days=7)
-        if not audio and not transcripts:
+        if not audio and not transcripts and not summaries:
             return []
         entries = []
         for entry in self.all_entries():
@@ -123,7 +126,7 @@ class LibraryHistoryService(HistoryService):
                 continue
             if query.strip() and not self._matches(entry, query.casefold()):
                 continue
-            selected = filter_artifacts(entry, audio, transcripts)
+            selected = filter_artifacts(entry, audio, transcripts, summaries)
             if selected:
                 entries.append(selected)
         return sorted(entries, key=lambda e: (e.start, e.title.casefold(), e.identifier))
