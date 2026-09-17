@@ -57,7 +57,8 @@ def test_week_merges_native_recording_and_transcript(tmp_path: Path):
     assert entry.title == "Daily Atlas"
     assert entry.duration_seconds == 1800
     assert {artifact.kind for artifact in entry.artifacts} == {"audio", "transcription"}
-    assert entry.start.hour == 10 and entry.start.minute == 0
+    expected_start = finished.astimezone() - timedelta(seconds=1800)
+    assert entry.start == expected_start
 
 
 def test_week_includes_untranscribed_recording(tmp_path: Path):

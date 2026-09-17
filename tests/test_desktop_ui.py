@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -288,13 +290,24 @@ def test_close_preserves_active_recording_before_services_close(desktop, qtbot):
 
 
 def test_result_copy_runs_file_read_in_worker_and_clipboard_on_gui(desktop, qtbot):
-    result = desktop.paths.results / 'transcription.txt'
-    result.write_text('Une transcription disponible.', encoding='utf-8')
-    desktop.results.load('job-one', {'files': [{'transcription_path': str(result), 'out_path': str(result)}]})
-    desktop.results.copy_selected()
-    qtbot.waitUntil(lambda: QApplication.clipboard().text() == 'Une transcription disponible.')
-    assert desktop.results.entries == [result]
-    assert desktop.results.zip_button.isEnabled()
+    ole_initialized = False
+    if sys.platform == 'win32':
+        result_code = ctypes.windll.ole32.OleInitialize(None)
+        if result_code not in (0, 1):
+            pytest.skip(f'OLE clipboard unavailable in this Windows test process: HRESULT {result_code}')
+        ole_initialized = True
+    try:
+        result = desktop.paths.results / 'transcription.txt'
+        result.write_text('Une transcription disponible.', encoding='utf-8')
+        desktop.results.load('job-one', {'files': [{'transcription_path': str(result), 'out_path': str(result)}]})
+        desktop.results.copy_selected()
+        qtbot.waitUntil(lambda: QApplication.clipboard().text() == 'Une transcription disponible.')
+        assert desktop.results.entries == [result]
+        assert desktop.results.zip_button.isEnabled()
+    finally:
+        if ole_initialized:
+            ctypes.windll.ole32.OleUninitialize()
+
 
 
 def test_native_window_starts_and_closes_without_binding_any_socket(qtbot, tmp_path, monkeypatch):

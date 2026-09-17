@@ -7,11 +7,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QApplication,
     QAbstractItemView,
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,

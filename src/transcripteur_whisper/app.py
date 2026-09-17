@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     exit_code = 0
     try:
-        from transcripteur_whisper.ui.main_window import MainWindow
+        from transcripteur_whisper.ui.library_window import MainWindow
         from transcripteur_whisper.ui.widgets.history_page import install_history_tab
 
         window = MainWindow(paths, monitor=False) if args.smoke_test else MainWindow(paths)
@@ -121,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                 vad=True,
                 mp3_encoder=True,
                 history_tab=hasattr(window, "history_page"),
+                storage_tab=hasattr(window, "storage_page"),
             )
             QTimer.singleShot(600, window.close)
             QTimer.singleShot(10000, lambda: app.exit(2))
