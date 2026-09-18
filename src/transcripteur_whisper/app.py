@@ -78,8 +78,8 @@ def main(argv: list[str] | None = None) -> int:
     }
     exit_code = 0
     try:
-        from transcripteur_whisper.ui.library_window import MainWindow
         from transcripteur_whisper.ui.widgets.history_page import install_history_tab
+        from transcripteur_whisper.ui.workspace_window import MainWindow
 
         window = MainWindow(paths, monitor=False) if args.smoke_test else MainWindow(paths)
         install_history_tab(window, paths)

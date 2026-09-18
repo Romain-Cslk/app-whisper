@@ -78,7 +78,10 @@ class LibraryJobService(JobService):
                 if record and not record.get("deleted"):
                     metadata["recording_id"] = record["id"]
                     metadata["recording_started_at"] = record["started_at"]
+                    metadata["recording_completed_at"] = record.get("completed_at")
                     metadata["recording_duration"] = record["duration"]
+                    metadata["recording_sources"] = dict(record.get("sources") or {})
+                    metadata["recording_source_names"] = dict(record.get("source_names") or {})
             job.setdefault("storage_transcript_dir", str(self.preferences.transcript_dir.resolve()))
             job.setdefault("storage_transcript_work_dir", str(self.paths.results.resolve()))
             job.setdefault("storage_state", "pending")
@@ -93,6 +96,7 @@ class LibraryJobService(JobService):
             manifest.pop("cancel_requested", None)
             for metadata in manifest["files"]:
                 metadata.pop("path", None)  # Never persist imported source paths.
+                metadata.pop("recording_sources", None)  # Private working sidecars stay local.
             path = self._manifest_paths.get(job_id, self.paths.results / job_id / "job.json")
             try:
                 atomic_json(path, manifest)
@@ -194,6 +198,7 @@ class LibraryJobService(JobService):
         snapshot = super().snapshot(job_id)
         roots = self._artifact_roots(job_id)
         for metadata in snapshot["files"]:
+            metadata.pop("recording_sources", None)
             for key, available in (("transcription_path", "transcription_available"),
                                    ("document_path", "document_available"),
                                    ("summary_path", "summary_available")):

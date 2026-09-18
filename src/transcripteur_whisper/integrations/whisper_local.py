@@ -12,16 +12,34 @@ def load_model(model_path: Path):
                         local_files_only=True)
 
 
-def transcribe(model, path: Path, language: str | None,
-               cancel_check: Callable[[], None], on_segment: Callable[[float, str], None]) -> str:
+def transcribe_segments(model, path: Path, language: str | None,
+                        cancel_check: Callable[[], None],
+                        on_segment: Callable[[float, list[dict]], None] | None = None):
+    """Return text plus Whisper timestamps without changing model behaviour."""
     segments, info = model.transcribe(str(path), language=language, beam_size=5, vad_filter=True)
     duration = info.duration or 1.0
+    timed: list[dict] = []
     lines: list[str] = []
     for segment in segments:
         cancel_check()
         text = (segment.text or "").strip()
         if text:
+            # Some backends/tests expose only ``end``. Missing timing fields must
+            # never discard text that Whisper has already yielded.
+            start = float(getattr(segment, "start", 0) or 0)
+            end = float(getattr(segment, "end", start) or start)
+            timed.append({"start": start, "end": max(start, end), "text": text})
             lines.append(text)
-        on_segment(min(max(0.0, segment.end) / duration, 1.0), "\n".join(lines).strip())
+        if on_segment is not None:
+            on_segment(min(max(0.0, float(segment.end or 0)) / duration, 1.0), list(timed))
     cancel_check()
-    return "\n".join(lines).strip()
+    return "\n".join(lines).strip(), timed
+
+
+def transcribe(model, path: Path, language: str | None,
+               cancel_check: Callable[[], None], on_segment: Callable[[float, str], None]) -> str:
+    def progress(value: float, segments: list[dict]) -> None:
+        on_segment(value, "\n".join(item["text"] for item in segments).strip())
+
+    text, _segments = transcribe_segments(model, path, language, cancel_check, progress)
+    return text

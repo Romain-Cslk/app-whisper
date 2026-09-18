@@ -9,8 +9,16 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime
 
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QAbstractAnimation, QEasingCurve, Qt, QTimer, QVariantAnimation
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QFormLayout,
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..services.ai_summary import PROVIDERS, SummaryPreferences
 from ..services.library_jobs import PHASES, LibraryJobService
@@ -48,6 +56,8 @@ class MainWindow(BaseWindow):
             recording = LibraryRecordingService(audio_paths, devices, self.catalog)
         self._maintenance_pending = False
         self._library_initial_load = False
+        self._queued_recordings = []
+        self._previous_job_completed = False
         super().__init__(job_paths, jobs=jobs, recording=recording, devices=devices, **kwargs)
         # Most pages can scroll; allow genuinely compact windows instead of
         # pinning the desktop application to the original 800 px minimum.
@@ -120,6 +130,91 @@ class MainWindow(BaseWindow):
         self.storage_page.saved.connect(self._storage_saved)
         self.tabs.addTab(self.storage_page, "Paramètres")
 
+    def _polish_native_ux(self):
+        self.tabs.setDocumentMode(True)
+        bar = self.tabs.tabBar()
+        bar.setExpanding(False)
+        bar.setUsesScrollButtons(True)
+        bar.setElideMode(Qt.TextElideMode.ElideRight)
+        form = self.options.layout()
+        if isinstance(form, QFormLayout):
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            form.setHorizontalSpacing(18)
+            form.setVerticalSpacing(10)
+        self._tab_animation = None
+        self._progress_effect = QGraphicsOpacityEffect(self.progress)
+        self.progress.setGraphicsEffect(self._progress_effect)
+        self._progress_pulse = QVariantAnimation(self)
+        self._progress_pulse.setDuration(1500)
+        self._progress_pulse.setStartValue(0.72)
+        self._progress_pulse.setKeyValueAt(0.5, 1.0)
+        self._progress_pulse.setEndValue(0.72)
+        self._progress_pulse.setLoopCount(-1)
+        self._progress_pulse.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._progress_pulse.valueChanged.connect(
+            lambda value: self._progress_effect.setOpacity(float(value))
+        )
+        self._progress_effect.setOpacity(1.0)
+        self._apply_responsive_chrome()
+
+    def _apply_responsive_chrome(self):
+        central = self.centralWidget()
+        if central is None or central.layout() is None:
+            return
+        compact = self.width() < 820
+        central.layout().setContentsMargins(*(12, 10, 12, 10) if compact else (28, 20, 28, 20))
+        central.layout().setSpacing(10 if compact else 16)
+        self.logo.setMaximumSize(105 if compact else 150, 42 if compact else 55)
+        self.tabs.tabBar().setMaximumWidth(max(420, self.width() - 70))
+
+    def _animate_tab(self):
+        # Never animate a QTabWidget page with QGraphicsOpacityEffect. On Windows,
+        # Qt can keep the faded page cached below the newly selected tab, which
+        # produces the translucent/ghosted text visible across several menus.
+        # Remove any page-level effect and force a normal opaque repaint instead.
+        for index in range(self.tabs.count()):
+            page = self.tabs.widget(index)
+            if page is not None and page.graphicsEffect() is not None:
+                page.setGraphicsEffect(None)
+                page.update()
+        self._tab_animation = None
+        current = self.tabs.currentWidget()
+        if current is not None:
+            current.update()
+        self.tabs.viewport().update() if hasattr(self.tabs, "viewport") else self.tabs.update()
+
+    def _set_processing_animation(self, active):
+        if not hasattr(self, "_progress_pulse"):
+            return
+        if active:
+            if self._progress_pulse.state() != QAbstractAnimation.State.Running:
+                self._progress_pulse.start()
+        else:
+            self._progress_pulse.stop()
+            self._progress_effect.setOpacity(1.0)
+
+    def _set_active(self, active):
+        # A transcription job and the capture engine are independent. Keep the
+        # recording tab live so a new meeting can be captured while Whisper works.
+        self._active = active
+        self.options.setEnabled(not active)
+        self.files.setEnabled(not active)
+        self.recording_panel.setEnabled(not self._closing)
+        self.cancel_button.setEnabled(active and not self._cancel_requested)
+        self._set_processing_animation(active)
+        self._update_start_enabled()
+
+    def _clear_file_selection(self):
+        self.files.table.setRowCount(0)
+        self.files._summary()
+        self.files.changed.emit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "tabs"):
+            self._apply_responsive_chrome()
+
     def _initialized(self):
         # Called by the base async initializer. Keep Start disabled until real
         # manifest loading + safe startup retention have finished.
@@ -133,6 +228,7 @@ class MainWindow(BaseWindow):
     def _tab_changed(self, index):
         if self.tabs.widget(index) is self.history_page and not self._initializing:
             self.history_page.activate()
+        self._animate_tab()
 
     def _submit_job(self, options):
         if self._cancel_requested or self._closing:
@@ -194,9 +290,29 @@ class MainWindow(BaseWindow):
                 details.append(f"{metadata.get('name', '')} · {phase} · {percent} %{suffix}")
         self.live_status.setText(" | ".join(details[:2]) or self.state.text())
         self.live_status.setToolTip(f"Dernier état reçu : {datetime.now():%H:%M:%S}")
+        if snapshot.get("status") in {"done", "partial", "error", "cancelled"} and rendered is snapshot:
+            self._previous_job_completed = True
+            if self._queued_recordings:
+                queued = list(dict.fromkeys(self._queued_recordings))
+                self._queued_recordings.clear()
+                self._clear_file_selection()
+                self.files.add_paths(queued)
+                self._previous_job_completed = False
+                self.show_notice(
+                    f"{len(queued)} nouvel enregistrement prêt pour une prochaine transcription."
+                )
 
     def _recording_saved(self, path):
-        super()._recording_saved(path)
+        if self._active:
+            self._queued_recordings.append(path)
+            self.show_notice(
+                f"Enregistrement conservé : {path.name}. Il sera prêt pour la prochaine transcription."
+            )
+        else:
+            if self._previous_job_completed:
+                self._clear_file_selection()
+                self._previous_job_completed = False
+            super()._recording_saved(path)
         self._refresh_library()
 
     def _refresh_library(self):

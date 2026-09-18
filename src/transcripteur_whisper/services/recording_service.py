@@ -26,11 +26,11 @@ class RecordingService:
     is_active and levels are cheap state reads and never enumerate devices.
     """
 
-    def __init__(self, paths: Any, devices: AudioDeviceService):
+    def __init__(self, paths: Any, devices: AudioDeviceService, *, preserve_sources: bool = False):
         self.paths = paths
         self.devices = devices
         self._journal_dir = Path(paths.temp) / "recordings"
-        self._recorder = NativeRecorder(self._journal_dir)
+        self._recorder = NativeRecorder(self._journal_dir, preserve_sources=preserve_sources)
         self._commands: queue.Queue = queue.Queue()
         self._worker_ready = threading.Event()
         self._startup_error: BaseException | None = None

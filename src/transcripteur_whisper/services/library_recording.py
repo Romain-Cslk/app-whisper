@@ -25,7 +25,7 @@ class LibraryRecordingService(RecordingService):
     """
 
     def __init__(self, paths, devices, catalog: AudioCatalog):
-        super().__init__(paths, devices)
+        super().__init__(paths, devices, preserve_sources=True)
         self.catalog = catalog
         self.output_name = ""
         self._capture_name = ""
@@ -62,11 +62,13 @@ class LibraryRecordingService(RecordingService):
         return renamed
 
     def _publish_path(self, path: Path, identifier: str, *, started_at: str | None,
-                      duration: float | None) -> Path:
+                      duration: float | None, sources: dict[str, str] | None = None,
+                      source_names: dict[str, str] | None = None) -> Path:
         work = Path(path).resolve()
         if not self.catalog.preferences.keep_final_audio:
             self.last_publish_error = None
-            self.catalog.register(work, identifier, started_at=started_at, duration=duration)
+            self.catalog.register(work, identifier, started_at=started_at, duration=duration,
+                                  sources=sources, source_names=source_names)
             return work
 
         final_dir = self.catalog.preferences.audio_dir.resolve()
@@ -78,10 +80,12 @@ class LibraryRecordingService(RecordingService):
         self.last_publish_error = None
         try:
             atomic_copy(work, destination)
-            self.catalog.register(destination, identifier, started_at=started_at, duration=duration)
+            self.catalog.register(destination, identifier, started_at=started_at, duration=duration,
+                                  sources=sources, source_names=source_names)
         except (OSError, LibraryError) as exc:
             self.last_publish_error = str(exc)
-            self.catalog.register(work, identifier, started_at=started_at, duration=duration)
+            self.catalog.register(work, identifier, started_at=started_at, duration=duration,
+                                  sources=sources, source_names=source_names)
             return work
 
         try:
@@ -90,7 +94,42 @@ class LibraryRecordingService(RecordingService):
             pass
         return destination
 
-    def _finalize_library_result(self, result):
+    def _archive_source_tracks(self, result):
+        """Move private source journals into a readable, app-owned sidecar folder."""
+        journal_dir = getattr(self, "_journal_dir", None)
+        if journal_dir is None:
+            return {}, {}
+        destination_dir = Path(self.paths.results) / "Sources" / result.recording_id
+        source_names = {
+            "microphone": str(getattr(result, "microphone_device_name", "") or "Microphone"),
+            "system": str(getattr(result, "system_device_name", "") or "Son du PC"),
+        }
+        destinations = {
+            "microphone": destination_dir / "moi_microphone.wav",
+            "system": destination_dir / "autres_son_du_pc.wav",
+        }
+        archived: dict[str, str] = {}
+        for role, destination in destinations.items():
+            source = Path(journal_dir) / f".native_recording_{result.recording_id}_{role}.wav"
+            try:
+                if not source.is_file() or source.stat().st_size <= 44:
+                    continue
+                destination_dir.mkdir(parents=True, exist_ok=True)
+                atomic_copy(source, destination)
+                source.unlink(missing_ok=True)
+                archived[role] = str(destination.resolve())
+            except OSError:
+                # The mixed WAV remains usable. A locked source journal is kept
+                # for recovery rather than making the recording fail.
+                continue
+        if not archived and destination_dir.exists():
+            try:
+                destination_dir.rmdir()
+            except OSError:
+                pass
+        return archived, {key: source_names[key] for key in archived}
+
+    def _finalize_library_result(self, result, *, sources=None, source_names=None):
         existing = self.catalog.find(result.path)
         if existing:
             return result
@@ -100,13 +139,17 @@ class LibraryRecordingService(RecordingService):
             result.recording_id,
             started_at=self._capture_start,
             duration=result.duration,
+            sources=sources,
+            source_names=source_names,
         )
         result = replace(result, path=published)
         self._last_completed = result
         return result
 
     def _stop(self):
-        return self._finalize_library_result(super()._stop())
+        result = super()._stop()
+        sources, source_names = self._archive_source_tracks(result)
+        return self._finalize_library_result(result, sources=sources, source_names=source_names)
 
     def force_stop(self):
         """Bounded fallback used after a normal stop timed out.
@@ -185,7 +228,7 @@ class LibraryRecordingService(RecordingService):
                             self._recorder._completed[native_result.recording_id] = native_result
                 if session.has_live_workers():
                     self._orphan_sessions.append((session, finalized))
-                elif finalized:
+                elif finalized and not getattr(session, "preserve_sources", False):
                     session._discard_source_files()
                 self._active_result = None
                 self._pending_final = None
@@ -207,7 +250,10 @@ class LibraryRecordingService(RecordingService):
             except OSError:
                 pass
             self._last_completed = persisted
-            result = self._finalize_library_result(persisted)
+            sources, source_names = self._archive_source_tracks(persisted)
+            result = self._finalize_library_result(
+                persisted, sources=sources, source_names=source_names
+            )
             return result
 
     def _reap_orphans(self):
@@ -237,7 +283,8 @@ class LibraryRecordingService(RecordingService):
                 remaining.append((session, finalized))
                 continue
             if finalized:
-                session._discard_source_files()
+                if not getattr(session, "preserve_sources", False):
+                    session._discard_source_files()
                 continue
             # If forced finalization initially failed only because a writer was
             # still draining, make a recoverable final WAV once it is safe.

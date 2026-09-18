@@ -329,9 +329,13 @@ def generate_daily_summary(
 
     notes: list[str] = []
     extraction = (
-        "Extrais uniquement les informations utiles à un compte rendu de daily : avancement, sujets, "
-        "blocages/risques, décisions, actions, responsables et échéances explicitement cités. "
-        "N'invente rien et ne rédige pas encore le compte rendu final." + safe_suffix
+        prompt
+        + "\n\nPhase de préparation : utilise les consignes et le contexte ci-dessus pour "
+        "extraire les faits utiles au type de document demandé. Conserve les noms, termes, "
+        "décisions et réserves explicitement présents dans cet extrait. "
+        "Ne rédige pas encore le document final. Le contexte aide à comprendre les termes, "
+        "mais ne prouve aucun fait ni aucune présence dans la réunion."
+        + safe_suffix
     )
     for index, chunk in enumerate(chunks, start=1):
         if cancel_check:

@@ -1,4 +1,4 @@
-"""Batch transcription orchestration, with persistent partial results."""
+"""Batch transcription orchestration, partial persistence and source separation."""
 from __future__ import annotations
 
 import shutil
@@ -11,6 +11,7 @@ from .document_service import generate_document
 from .files import output_filename, write_text_atomic
 from .media_service import MediaService
 from .model_service import ModelService
+from .transcript_format import format_recording_transcript, merge_speaker_segments, speaker_sections
 
 
 class TranscriptionService:
@@ -43,6 +44,64 @@ class TranscriptionService:
                     pass
             del model
 
+    @staticmethod
+    def _speaker_sources(metadata: dict):
+        raw = metadata.get("recording_sources") or {}
+        result = []
+        for role in ("microphone", "system"):
+            value = raw.get(role)
+            if value:
+                path = Path(value)
+                if path.is_file():
+                    result.append((role, path))
+        return result
+
+    def _local_source_transcript(self, sources, model, language, reporter, partial):
+        collected: dict[str, list[dict]] = {}
+        total = max(1, len(sources))
+        for source_index, (role, path) in enumerate(sources):
+            label = "Moi / microphone" if role == "microphone" else "Autres interlocuteurs / son du PC"
+            reporter.log(f"Séparation par source : {label}.")
+
+            def update(progress, segments, role=role, source_index=source_index):
+                collected[role] = segments
+                partial((source_index + progress) / total, merge_speaker_segments(collected),
+                        speaker_separated=True)
+
+            _text, segments = whisper_local.transcribe_segments(
+                model, path, language, reporter.cancel_check, update
+            )
+            collected[role] = segments
+        return merge_speaker_segments(collected)
+
+    def _api_source_transcript(self, job, index, sources, options, client, reporter, partial):
+        collected: dict[str, str] = {}
+        cleanups = []
+        total = max(1, len(sources))
+        try:
+            for source_index, (role, path) in enumerate(sources):
+                label = "Moi / microphone" if role == "microphone" else "Autres interlocuteurs / son du PC"
+                reporter.log(f"Séparation par source API : {label}.")
+                chunks, cleanup, _duration = self.media.prepare_api_chunks(
+                    job["id"], index * 10 + source_index + 1, path,
+                    f"{job['files'][index]['output_stem']}_{role}", reporter.cancel_check,
+                )
+                cleanups.append(cleanup)
+
+                def on_chunk(position, text, role=role, source_index=source_index, count=len(chunks)):
+                    collected[role] = text
+                    partial((source_index + position / max(1, count)) / total,
+                            speaker_sections(collected), speaker_separated=True,
+                            segment_index=position, segment_count=count)
+
+                collected[role] = openai_service.transcribe_chunks(
+                    client, chunks, options.model, options.language, reporter.cancel_check, on_chunk
+                )
+            return speaker_sections(collected)
+        finally:
+            for cleanup in cleanups:
+                shutil.rmtree(cleanup, ignore_errors=True)
+
     def _run_file(self, job, index, metadata, options, model, client, reporter):
         cleanup = None
         result_dir = self.paths.results / job["id"]
@@ -52,7 +111,7 @@ class TranscriptionService:
 
         def partial(progress: float, text: str, **changes) -> None:
             if text:
-                write_text_atomic(transcript, text)
+                write_text_atomic(transcript, format_recording_transcript(metadata, text))
                 changes.update(out_path=str(transcript), transcription_path=str(transcript),
                                transcription_available=True)
             reporter.file(index, progress=progress * weight, **changes)
@@ -62,7 +121,20 @@ class TranscriptionService:
         reporter.log(f"Traitement : {metadata['name']}")
         try:
             source = Path(metadata["path"])
-            if options.use_api:
+            speaker_sources = self._speaker_sources(metadata)
+            if speaker_sources:
+                reporter.file(index, stage="transcription_api" if options.use_api else "transcription_local")
+                reporter.log("Transcription séparée par source audio : microphone = Moi ; son du PC = Autres interlocuteurs.")
+                if options.use_api:
+                    text = self._api_source_transcript(
+                        job, index, speaker_sources, options, client, reporter, partial
+                    )
+                else:
+                    reporter.log("VAD Silero · beam_size=5 · séparation source audio")
+                    text = self._local_source_transcript(
+                        speaker_sources, model, options.language, reporter, partial
+                    )
+            elif options.use_api:
                 chunks, cleanup, duration = self.media.prepare_api_chunks(
                     job["id"], index, source, metadata["output_stem"], reporter.cancel_check)
                 reporter.file(index, stage="transcription_api", duration=duration, segment_count=len(chunks))
@@ -81,7 +153,9 @@ class TranscriptionService:
                 reporter.log("VAD Silero · beam_size=5")
                 text = whisper_local.transcribe(model, processing, options.language,
                                                reporter.cancel_check, partial)
-            write_text_atomic(transcript, text)
+
+            rendered = format_recording_transcript(metadata, text)
+            write_text_atomic(transcript, rendered)
             reporter.file(index, out_path=str(transcript), transcription_path=str(transcript),
                           transcription_available=True, stage="recomposition")
             reporter.cancel_check()

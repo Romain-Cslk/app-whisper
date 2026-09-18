@@ -118,6 +118,7 @@ class _RecordingSession:
         speaker_name: str,
         microphone_enabled: bool = True,
         system_enabled: bool = True,
+        preserve_sources: bool = False,
     ) -> None:
         if np is None or sf is None or sc is None or sd is None:
             raise NativeRecorderUnsupported(
@@ -129,6 +130,7 @@ class _RecordingSession:
         self.microphone_name = microphone_name
         self.speaker_id = speaker_id
         self.speaker_name = speaker_name
+        self.preserve_sources = bool(preserve_sources)
         self._stop_event = threading.Event()
         self._closing_system = threading.Event()
         self._state_lock = threading.RLock()
@@ -290,8 +292,10 @@ class _RecordingSession:
                     f"Mix: {mix_exc}; récupération: {salvage_exc}"
                 ) from mix_exc
         self._verify_final_output()
-        # Temporary source files are deleted only after a valid final WAV exists.
-        self._discard_source_files()
+        # Library mode preserves the two physical source tracks so a later
+        # transcript can distinguish the local microphone from remote/system audio.
+        if not self.preserve_sources:
+            self._discard_source_files()
         self._start_ts = None
         return NativeRecordingResult(
             recording_id=self.recording_id,
@@ -844,8 +848,9 @@ class _RecordingSession:
 
 
 class NativeRecorder:
-    def __init__(self, base_dir: Path):
+    def __init__(self, base_dir: Path, *, preserve_sources: bool = False):
         self._base_dir = Path(base_dir)
+        self._preserve_sources = bool(preserve_sources)
         self._base_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._active: Optional[_RecordingSession] = None
@@ -938,6 +943,7 @@ class NativeRecorder:
                 speaker_name=speaker_name,
                 microphone_enabled=microphone_enabled,
                 system_enabled=system_enabled,
+                preserve_sources=self._preserve_sources,
             )
             self._active = session
             try:

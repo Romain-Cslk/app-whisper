@@ -302,7 +302,8 @@ class AudioCatalog:
         atomic_json(self.file, {"version": 1, "records": self.records})
 
     def register(self, path: Path, identifier: str, *, started_at: str | None = None,
-                 duration: float | None = None) -> dict:
+                 duration: float | None = None, sources: dict[str, str] | None = None,
+                 source_names: dict[str, str] | None = None) -> dict:
         with self.lock:
             path = checked_file(path, self.roots, (".wav",))
             old = self.records.get(identifier)
@@ -315,11 +316,24 @@ class AudioCatalog:
             valid_duration = (float(duration) if duration is not None and math.isfinite(float(duration))
                               and 0 <= float(duration) < 366 * 86400 else None)
             start = started_at or (ended - timedelta(seconds=valid_duration or 0)).isoformat()
+            source_files: dict[str, str] = {}
+            for role, raw in (sources or {}).items():
+                if role not in {"microphone", "system"}:
+                    continue
+                try:
+                    source_files[role] = str(checked_file(Path(raw), self.roots, (".wav",)))
+                except (OSError, LibraryError):
+                    continue
+            source_labels = {
+                role: str((source_names or {}).get(role) or ("Microphone" if role == "microphone" else "Son du PC"))
+                for role in source_files
+            }
             record = {"id": identifier, "path": str(path), "name": path.name,
                       "started_at": start, "completed_at": ended.isoformat(),
                       "duration": valid_duration, "size": stat.st_size,
                       "mtime_ns": stat.st_mtime_ns, "deleted": False,
-                      "time_estimated": started_at is None}
+                      "time_estimated": started_at is None,
+                      "sources": source_files, "source_names": source_labels}
             self.records[identifier] = record
             try:
                 self._save()
@@ -354,6 +368,19 @@ class AudioCatalog:
             if (stat.st_size, stat.st_mtime_ns) != (record["size"], record["mtime_ns"]):
                 raise LibraryError("L'audio a changé depuis sa création. Suppression refusée.")
             safe.unlink()  # Keep timing/link metadata for the remaining transcript.
+            source_parents = set()
+            for raw in (record.get("sources") or {}).values():
+                try:
+                    sidecar = checked_file(Path(raw), self.roots, (".wav",))
+                    source_parents.add(sidecar.parent)
+                    sidecar.unlink(missing_ok=True)
+                except (OSError, LibraryError):
+                    continue
+            for folder in source_parents:
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
             self.records[record["id"]]["deleted"] = True
             self._save()
 

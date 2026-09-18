@@ -40,7 +40,7 @@ class LibraryHistoryService(HistoryService):
         for root in self.roots:
             for folder, directories, filenames in os.walk(root, followlinks=False):
                 directories[:] = [name for name in directories
-                    if name not in {".git", ".venv", "__pycache__"}
+                    if name not in {".git", ".venv", "__pycache__", "Sources"}
                     and not (Path(folder) / name).is_symlink()
                     and (Path(folder) / name).absolute() == (Path(folder) / name).resolve()]
                 for name in filenames:

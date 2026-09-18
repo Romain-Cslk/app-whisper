@@ -358,3 +358,27 @@ def test_finished_job_folder_becomes_readable(library):
     assert "11111111" in new_folder.name
     assert not old_folder.exists()
     assert (new_folder / "job.json").is_file()
+
+def test_catalog_removes_private_source_tracks_with_recording(library):
+    _paths, catalog, _jobs = library
+    root = catalog.preferences.audio_work_dir
+    root.mkdir(parents=True, exist_ok=True)
+    audio = root / "audio_test.wav"
+    audio.write_bytes(b"mixed")
+    source_dir = root / "Sources" / "source-test"
+    source_dir.mkdir(parents=True)
+    microphone = source_dir / "moi_microphone.wav"
+    system = source_dir / "autres_son_du_pc.wav"
+    microphone.write_bytes(b"mic")
+    system.write_bytes(b"pc")
+    catalog.register(
+        audio,
+        "source-test",
+        duration=10,
+        sources={"microphone": str(microphone), "system": str(system)},
+        source_names={"microphone": "Micro", "system": "Teams"},
+    )
+    catalog.delete(audio)
+    assert not audio.exists()
+    assert not microphone.exists()
+    assert not system.exists()
