@@ -1,0 +1,49 @@
+name: Desktop UX v8 validation
+on:
+  push:
+    branches: [feat/desktop-native-ergonomie-v8]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONPATH: src
+      WHISPER_DATA_DIR: ${{ runner.temp }}/whisper-ux-test-data
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Source snapshot for reproducible validation
+        shell: python
+        run: |
+          import pathlib, subprocess, zipfile
+          paths = subprocess.check_output(['git','ls-files','-z']).decode().split('\0')
+          with zipfile.ZipFile('ux-source-snapshot.zip', 'w', zipfile.ZIP_DEFLATED) as out:
+              for name in paths:
+                  if name and pathlib.Path(name).is_file():
+                      out.write(name)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ux-source-snapshot
+          path: ux-source-snapshot.zip
+          retention-days: 3
+      - run: python -m pip install -e . pytest==8.4.2 pytest-qt==4.5.0 ruff
+      - run: python -m compileall -q src tests
+      - run: python -m pytest -q --junitxml=ux-tests.xml
+      - name: Capture layout checks
+        if: ${{ hashFiles('scripts/capture_ux_v8.py') != '' }}
+        run: python scripts/capture_ux_v8.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ux-validation
+          path: |
+            ux-tests.xml
+            ux-captures
+          if-no-files-found: ignore
+          retention-days: 7
